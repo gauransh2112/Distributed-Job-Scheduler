@@ -1,3 +1,21 @@
 spring:
   application:
     name: distributed-job-scheduler
+  profiles:
+    active: local
+
+logging:
+  level:
+    root: INFO
+    com.scheduler.job: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info
+  endpoint:
+    health:
+      show-details: when-authorized

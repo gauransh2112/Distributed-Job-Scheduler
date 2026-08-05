@@ -1,0 +1,32 @@
+logging:
+  level:
+    com.scheduler.job: DEBUG
+
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/scheduler_db
+    username: scheduler_user
+    password: scheduler_pass
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      initialization-fail-timeout: -1
+  jpa:
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+    hibernate:
+      ddl-auto: none
+    open-in-view: false
+  flyway:
+    enabled: false
+    baseline-on-migrate: true
+    locations: classpath:db/migration
+  data:
+    redis:
+      host: localhost
+      port: 6379
+
+aws:
+  region: us-east-1
+  access-key-id: test
+  secret-access-key: test
+  sqs:
+    endpoint: http://localhost:4566
