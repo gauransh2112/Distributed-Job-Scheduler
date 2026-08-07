@@ -198,8 +198,8 @@ src
 
 | Phase | Status |
 |-------|--------|
-| Phase 0 | 🚧 In Progress |
-| Phase 1 | ⏳ Pending |
+| Phase 0 | ✅ Completed |
+| Phase 1 | In progress |
 | Phase 2 | ⏳ Pending |
 | Phase 3 | ⏳ Pending |
 
