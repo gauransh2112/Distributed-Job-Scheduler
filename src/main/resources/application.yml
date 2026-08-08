@@ -4,6 +4,10 @@ spring:
   profiles:
     active: local
 
+scheduler:
+  defaults:
+    max-retries: 5
+
 logging:
   level:
     root: INFO

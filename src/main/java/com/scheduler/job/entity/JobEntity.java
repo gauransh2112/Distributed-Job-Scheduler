@@ -81,7 +81,9 @@ public class JobEntity {
         if (createdAt == null) {
             createdAt = now;
         }
-        updatedAt = now;
+        if (updatedAt == null) {
+            updatedAt = now;
+        }
         if (status == null) {
             status = JobStatus.PENDING;
         }
