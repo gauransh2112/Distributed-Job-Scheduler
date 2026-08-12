@@ -7,6 +7,7 @@ spring:
 scheduler:
   defaults:
     max-retries: 5
+    max-page-size: 100
 
 logging:
   level:
