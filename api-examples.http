@@ -1,0 +1,90 @@
+### Distributed Job Scheduler - Phase 1 API Examples
+### Can be executed using IntelliJ IDEA HTTP Client or VS Code REST Client plugin.
+
+@baseUrl = http://localhost:8080
+@jobId = 00000000-0000-0000-0000-000000000000
+
+### 1. Submit Job - Success (201 Created)
+POST {{baseUrl}}/api/v1/jobs
+Content-Type: application/json
+
+{
+  "jobType": "SEND_EMAIL",
+  "payload": "{\"to\":\"user@example.com\",\"template\":\"WELCOME_EMAIL\",\"userId\":1001}",
+  "scheduledAt": "2026-12-31T23:59:59Z",
+  "idempotencyKey": "IDEM-EMAIL-2026-001"
+}
+
+###
+
+### 2. Submit Job - Duplicate Idempotency Key (409 Conflict)
+# Re-submitting the exact same idempotencyKey should trigger 409 Conflict.
+POST {{baseUrl}}/api/v1/jobs
+Content-Type: application/json
+
+{
+  "jobType": "SEND_EMAIL",
+  "payload": "{\"to\":\"user@example.com\",\"template\":\"WELCOME_EMAIL\",\"userId\":1001}",
+  "scheduledAt": "2026-12-31T23:59:59Z",
+  "idempotencyKey": "IDEM-EMAIL-2026-001"
+}
+
+###
+
+### 3. Submit Job - Request Body Validation Error (400 Bad Request)
+# Fails validation due to blank jobType and past scheduledAt timestamp.
+POST {{baseUrl}}/api/v1/jobs
+Content-Type: application/json
+
+{
+  "jobType": "",
+  "payload": "",
+  "scheduledAt": "2020-01-01T00:00:00Z",
+  "idempotencyKey": ""
+}
+
+###
+
+### 4. Get Job Details by ID - Success (200 OK)
+# Replace {{jobId}} with a valid UUID returned from POST /api/v1/jobs
+GET {{baseUrl}}/api/v1/jobs/{{jobId}}
+Accept: application/json
+
+###
+
+### 5. Get Job Details by ID - Not Found (404 Not Found)
+GET {{baseUrl}}/api/v1/jobs/00000000-0000-0000-0000-000000000000
+Accept: application/json
+
+###
+
+### 6. List Jobs - Default Pagination (200 OK)
+GET {{baseUrl}}/api/v1/jobs
+Accept: application/json
+
+###
+
+### 7. List Jobs - With Status Filter & Pagination Parameters (200 OK)
+GET {{baseUrl}}/api/v1/jobs?status=PENDING&page=0&size=10&sortBy=createdAt&sortOrder=DESC
+Accept: application/json
+
+###
+
+### 8. List Jobs - Invalid Sort Field (400 Bad Request)
+# Fails validation because 'invalidField' is not in the allowed sortBy list.
+GET {{baseUrl}}/api/v1/jobs?sortBy=invalidField
+Accept: application/json
+
+###
+
+### 9. List Jobs - Excessive Page Size Boundary Error (400 Bad Request)
+# Fails validation because size=150 exceeds the maximum allowed page size (100).
+GET {{baseUrl}}/api/v1/jobs?size=150
+Accept: application/json
+
+###
+
+### 10. List Jobs - Invalid Sort Order (400 Bad Request)
+# Fails validation because sortOrder must be either ASC or DESC.
+GET {{baseUrl}}/api/v1/jobs?sortOrder=INVALID
+Accept: application/json
