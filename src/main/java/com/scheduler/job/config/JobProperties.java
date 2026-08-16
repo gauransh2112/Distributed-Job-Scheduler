@@ -18,8 +18,4 @@ public record JobProperties(
             maxPageSize = 100;
         }
     }
-
-    public JobProperties(int maxRetries) {
-        this(maxRetries, 100);
-    }
 }

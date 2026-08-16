@@ -56,7 +56,7 @@ class JobSubmissionServiceTest {
     @BeforeEach
     void setUp() {
         jobMapper = Mappers.getMapper(JobMapper.class);
-        jobProperties = new JobProperties(5);
+        jobProperties = new JobProperties(5, 100);
         jobSubmissionService = new JobSubmissionServiceImpl(jobRepository, jobMapper, jobProperties);
         jobQueryService = new JobQueryServiceImpl(jobRepository, jobMapper);
     }
