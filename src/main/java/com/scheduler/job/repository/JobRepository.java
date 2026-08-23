@@ -5,16 +5,18 @@ import com.scheduler.job.entity.JobStatus;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
 /**
  * Spring Data JPA repository for JobEntity persistence operations.
- * 
- * Phase 1 Scope: Core CRUD, Idempotency key lookup, and status-based pagination.
- * Excludes Phase 2 claiming queries (FOR UPDATE SKIP LOCKED).
+ * Includes Phase 2 PostgreSQL atomic claiming queries (FOR UPDATE SKIP LOCKED).
  */
 @Repository
 public interface JobRepository extends JpaRepository<JobEntity, UUID> {
@@ -35,4 +37,26 @@ public interface JobRepository extends JpaRepository<JobEntity, UUID> {
      * @return Page of matching JobEntity records
      */
     Page<JobEntity> findByStatus(JobStatus status, Pageable pageable);
+
+    /**
+     * Atomically select and row-lock due PENDING jobs for claiming using PostgreSQL FOR UPDATE SKIP LOCKED.
+     * Concurrently executing schedulers will skip rows currently locked by other transactions, preventing wait-blocking.
+     *
+     * @param now current timestamp to filter due jobs (scheduled_at <= now)
+     * @param limit maximum batch size to claim
+     * @return List of locked JobEntity records ready for claiming
+     */
+    @Query(value = """
+            SELECT * FROM jobs
+            WHERE status = 'PENDING'
+              AND scheduled_at <= :now
+            ORDER BY scheduled_at ASC
+            LIMIT :limit
+            FOR UPDATE SKIP LOCKED
+            """, nativeQuery = true)
+    List<JobEntity> findEligibleJobsForClaim(
+            @Param("now") Instant now,
+            @Param("limit") int limit
+    );
 }
+
