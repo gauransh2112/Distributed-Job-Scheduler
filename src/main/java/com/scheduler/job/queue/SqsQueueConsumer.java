@@ -13,6 +13,7 @@ import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.DeleteMessageRequest;
 import software.amazon.awssdk.services.sqs.model.Message;
+import software.amazon.awssdk.services.sqs.model.MessageSystemAttributeName;
 import software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest;
 
 import java.util.ArrayList;
@@ -34,10 +35,20 @@ import java.util.Objects;
  * at-least-once rather than exactly-once.
  *
  * <p><strong>Invalid message policy.</strong> A message whose body is not parseable, or which violates
- * the {@link JobMessage} contract, can never become processable — redelivering it would block the queue
- * with a poison message. Such a message is therefore logged at ERROR with its identity and stack trace
- * and then deleted. Nothing is lost silently: the job row itself remains in PostgreSQL as the source of
- * truth, and the failure is visible in the logs.
+ * the {@link JobMessage} contract, is logged at ERROR with its identity and stack trace and is
+ * <strong>not</strong> acknowledged. It is withheld from the caller and left on the queue, so the
+ * visibility timeout expires and SQS redelivers it.
+ *
+ * <p>Deleting such a message would be unsafe in Phase 2. The corresponding job row is {@code CLAIMED},
+ * and the scheduler only rediscovers {@code PENDING} rows, so destroying the only executable copy of
+ * the message would strand that job in {@code CLAIMED} forever with no execution and no recovery path.
+ * Redelivery keeps the job recoverable.
+ *
+ * <p>The accepted cost is that an unprocessable message is redelivered indefinitely and logged on every
+ * delivery. That is deliberate for Phase 2: a noisy, visible, recoverable loop is preferable to silent
+ * permanent data loss. Deciding such a message's terminal fate belongs to the dead letter queue policy
+ * in a later task, which owns application-level DLQ handling. {@code ApproximateReceiveCount} is logged
+ * on every occurrence so a looping message is immediately visible to an operator.
  */
 @Component
 @ConditionalOnProperty(prefix = "aws.sqs", name = "enabled", havingValue = "true", matchIfMissing = true)
@@ -63,15 +74,15 @@ public class SqsQueueConsumer implements QueueConsumer {
     @Override
     public List<ReceivedJobMessage> consume() {
         AwsProperties.Sqs sqs = awsProperties.sqs();
-        String queueUrl;
         List<Message> messages;
         try {
-            queueUrl = queueUrlProvider.getQueueUrl();
+            String queueUrl = queueUrlProvider.getQueueUrl();
             messages = sqsClient.receiveMessage(ReceiveMessageRequest.builder()
                     .queueUrl(queueUrl)
                     .maxNumberOfMessages(sqs.maxMessagesPerPoll())
                     .waitTimeSeconds(sqs.waitTimeSeconds())
                     .visibilityTimeout(sqs.visibilityTimeoutSeconds())
+                    .attributeNamesWithStrings(MessageSystemAttributeName.APPROXIMATE_RECEIVE_COUNT.toString())
                     .build()).messages();
         } catch (SdkException e) {
             log.error("Failed to receive messages from SQS queue '{}'", sqs.queueName(), e);
@@ -94,7 +105,7 @@ public class SqsQueueConsumer implements QueueConsumer {
                         jobMessage.traceId(), message.messageId());
                 received.add(new ReceivedJobMessage(message.messageId(), message.receiptHandle(), jobMessage));
             } catch (InvalidQueueMessageException e) {
-                discardPoisonMessage(queueUrl, message, e);
+                withholdPoisonMessage(message, e);
             }
         }
         return received;
@@ -126,22 +137,19 @@ public class SqsQueueConsumer implements QueueConsumer {
     }
 
     /**
-     * Deletes a structurally unprocessable message so it cannot be redelivered indefinitely.
+     * Logs an unprocessable message and withholds it from the caller without acknowledging it.
      *
-     * <p>The deletion failure is logged rather than rethrown: the caller is mid-batch, the message is
-     * already unusable, and failing the whole receive would also drop the valid messages in the batch.
-     * If the delete fails the message simply becomes visible again and is discarded again on redelivery.
+     * <p>The message is deliberately left on the queue: it is not deleted here, and no deletion failure
+     * can be swallowed because no deletion is attempted. The visibility timeout expires and SQS
+     * redelivers the message, which keeps the underlying {@code CLAIMED} job recoverable instead of
+     * stranding it with its only executable message destroyed.
      */
-    private void discardPoisonMessage(String queueUrl, Message message, InvalidQueueMessageException cause) {
-        log.error("Discarding unprocessable SQS message: sqs_message_id={}, queue={}, body_length={}",
+    private void withholdPoisonMessage(Message message, InvalidQueueMessageException cause) {
+        log.error("Unprocessable SQS message withheld and left on the queue for redelivery: "
+                        + "sqs_message_id={}, queue={}, body_length={}, approximate_receive_count={}",
                 message.messageId(), awsProperties.sqs().queueName(),
-                message.body() == null ? 0 : message.body().length(), cause);
-        try {
-            deleteMessage(queueUrl, message.receiptHandle());
-        } catch (SdkException e) {
-            log.error("Failed to delete unprocessable SQS message '{}'; it will be discarded again on redelivery",
-                    message.messageId(), e);
-        }
+                message.body() == null ? 0 : message.body().length(),
+                message.attributes().get(MessageSystemAttributeName.APPROXIMATE_RECEIVE_COUNT), cause);
     }
 
     private void deleteMessage(String queueUrl, String receiptHandle) {

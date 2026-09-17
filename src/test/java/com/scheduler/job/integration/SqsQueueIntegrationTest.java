@@ -23,13 +23,17 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 import software.amazon.awssdk.services.sqs.SqsClient;
+import software.amazon.awssdk.services.sqs.model.Message;
+import software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest;
 import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -55,6 +59,7 @@ class SqsQueueIntegrationTest {
     private static final int VISIBILITY_TIMEOUT_SECONDS = 2;
     private static final int WAIT_TIME_SECONDS = 1;
     private static final int MAX_MESSAGES_PER_POLL = 10;
+    private static final String MALFORMED_BODY = "this is not json";
 
     @Container
     static final LocalStackContainer localstack = new LocalStackContainer(
@@ -157,13 +162,13 @@ class SqsQueueIntegrationTest {
     }
 
     @Test
-    @DisplayName("A malformed message body is discarded safely and does not block valid messages")
-    void testMalformedMessageIsDiscardedAndValidMessagesStillFlow() {
+    @DisplayName("A malformed message is withheld but left on the queue, and does not block valid messages")
+    void testMalformedMessageIsNotDeletedAndValidMessagesStillFlow() {
         Fixture fixture = newFixture(true);
         String queueUrl = queueUrl(fixture.queueName);
         sqsClient.sendMessage(SendMessageRequest.builder()
                 .queueUrl(queueUrl)
-                .messageBody("this is not json")
+                .messageBody(MALFORMED_BODY)
                 .build());
 
         JobEntity job = job("SEND_EMAIL", 0);
@@ -174,22 +179,33 @@ class SqsQueueIntegrationTest {
         assertEquals(job.getId(), received.get(0).message().jobId());
         fixture.consumer.acknowledge(received.get(0));
 
-        // The poison message was deleted rather than left to be redelivered forever.
-        assertNoMessages(fixture.consumer, Duration.ofSeconds(VISIBILITY_TIMEOUT_SECONDS * 3L));
+        // The malformed message must still be on the queue: deleting it would destroy the only
+        // executable copy of a job that is CLAIMED in PostgreSQL, and the Phase 2 scheduler only
+        // rediscovers PENDING rows, so that job could never run again.
+        assertTrue(rawReceiveMatching(queueUrl, MALFORMED_BODY::equals, Duration.ofSeconds(20)).isPresent(),
+                "The unprocessable message must remain on the queue for redelivery, not be deleted");
     }
 
     @Test
-    @DisplayName("A structurally valid JSON message that violates the message contract is discarded")
-    void testContractViolatingMessageIsDiscarded() {
+    @DisplayName("A contract-violating message is withheld but left on the queue for redelivery")
+    void testContractViolatingMessageIsNotDeleted() {
         Fixture fixture = newFixture(true);
-        // Valid JSON, but jobType is missing: unprocessable no matter how often it is redelivered.
+        String queueUrl = queueUrl(fixture.queueName);
+        // Valid JSON, but jobType is missing: unprocessable until the DLQ policy of a later task
+        // decides its terminal fate.
+        String body = "{\"jobId\":\"" + UUID.randomUUID()
+                + "\",\"payload\":\"{}\",\"retryCount\":0,\"traceId\":\"trace-contract\"}";
         sqsClient.sendMessage(SendMessageRequest.builder()
-                .queueUrl(queueUrl(fixture.queueName))
-                .messageBody("{\"jobId\":\"" + UUID.randomUUID()
-                        + "\",\"payload\":\"{}\",\"retryCount\":0,\"traceId\":\"trace-contract\"}")
+                .queueUrl(queueUrl)
+                .messageBody(body)
                 .build());
 
-        assertNoMessages(fixture.consumer, Duration.ofSeconds(VISIBILITY_TIMEOUT_SECONDS * 3L));
+        // The consumer never hands it to the caller ...
+        assertNoMessages(fixture.consumer, Duration.ofSeconds(VISIBILITY_TIMEOUT_SECONDS * 2L));
+
+        // ... but it is still there, and is redelivered rather than silently destroyed.
+        assertTrue(rawReceiveMatching(queueUrl, body::equals, Duration.ofSeconds(20)).isPresent(),
+                "The unprocessable message must remain on the queue for redelivery, not be deleted");
     }
 
     @Test
@@ -289,6 +305,29 @@ class SqsQueueIntegrationTest {
             List<ReceivedJobMessage> messages = consumer.consume();
             assertTrue(messages.isEmpty(), "Expected no messages, but received " + messages.size());
         }
+    }
+
+    /**
+     * Receives directly through the SDK, bypassing the consumer, to observe what is actually still on
+     * the queue. A zero visibility timeout is used so that observing a message does not hide it.
+     */
+    private Optional<Message> rawReceiveMatching(String queueUrl, Predicate<String> bodyMatcher, Duration timeout) {
+        Instant deadline = Instant.now().plus(timeout);
+        while (Instant.now().isBefore(deadline)) {
+            List<Message> messages = sqsClient.receiveMessage(ReceiveMessageRequest.builder()
+                    .queueUrl(queueUrl)
+                    .maxNumberOfMessages(MAX_MESSAGES_PER_POLL)
+                    .waitTimeSeconds(WAIT_TIME_SECONDS)
+                    .visibilityTimeout(0)
+                    .build()).messages();
+            Optional<Message> match = messages.stream()
+                    .filter(message -> bodyMatcher.test(message.body()))
+                    .findFirst();
+            if (match.isPresent()) {
+                return match;
+            }
+        }
+        return Optional.empty();
     }
 
     private JobEntity job(String jobType, int retryCount) {
