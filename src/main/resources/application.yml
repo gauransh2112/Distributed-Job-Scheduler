@@ -5,6 +5,15 @@ spring:
     active: local
 
 scheduler:
+  # Disabling this removes the polling loop entirely; jobs are then only claimed by an explicit caller.
+  enabled: true
+  # Fixed delay between the end of one poll and the start of the next.
+  poll-interval-ms: ${SCHEDULER_POLL_INTERVAL_MS:5000}
+  # Maximum jobs claimed per poll.
+  batch-size: ${SCHEDULER_BATCH_SIZE:50}
+  # instance-id is intentionally NOT set here. Each JVM defaults to a unique generated id, which is what
+  # multiple instances need; a shared value from configuration would make every instance claim under the
+  # same identity. Override per instance with the SCHEDULER_INSTANCE_ID environment variable.
   defaults:
     max-retries: 5
     max-page-size: 100
