@@ -872,22 +872,22 @@ Added in Phase 2 / Task 6.
 
 Purpose
 
-Signals that no JobHandler is registered for a job type.
+Signals that no JobHandler is registered for the requested job type.
 
 Behavior
 
 Thrown by HandlerRegistry.resolve() when the job type is unknown or null.
 
-Distinct from JobExecutionException: the work never started, because nothing
-knows how to perform it. JobExecutionException means a handler ran and failed.
-
-The distinction is what lets the worker treat an unknown job type as
-non-retryable. The registered handler set is fixed for the life of the process,
-so redelivering the job cannot produce a different outcome, whereas a failed
-execution may succeed on retry.
+Distinct from JobExecutionException: JobExecutionException means a handler ran
+and the work failed, whereas this means no handler exists and the work never
+started.
 
 Never resolved to null or to a silent no-op: an unknown type must not let a job
 nobody can run be recorded as if it had run.
+
+Retry classification is not decided here. Retry eligibility and DLQ eligibility
+belong to RetryService per the Implementation Guide, and are defined in
+Phase 2 / Task 8. Task 6 defines only what the exception means.
 
 ---
 
