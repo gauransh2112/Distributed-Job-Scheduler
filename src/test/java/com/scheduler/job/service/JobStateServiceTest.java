@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -74,19 +75,40 @@ class JobStateServiceTest {
     }
 
     @Test
-    @DisplayName("markRunning - Success: CLAIMED -> RUNNING")
+    @DisplayName("markRunning - Success: CLAIMED -> RUNNING through the atomic compare-and-swap")
     void markRunning_LegalTransition() {
         UUID jobId = UUID.randomUUID();
-        JobEntity entity = createJobEntity(jobId, JobStatus.CLAIMED);
+        // The conditional UPDATE already moved the row, so the re-read observes RUNNING.
+        JobEntity entity = createJobEntity(jobId, JobStatus.RUNNING);
 
+        when(jobRepository.markRunningIfClaimed(eq(jobId), any(Instant.class))).thenReturn(1);
         when(jobRepository.findById(jobId)).thenReturn(Optional.of(entity));
-        when(jobRepository.save(any(JobEntity.class))).thenAnswer(inv -> inv.getArgument(0));
 
         JobEntity result = jobStateService.markRunning(jobId);
 
         assertNotNull(result);
         assertEquals(JobStatus.RUNNING, result.getStatus());
-        verify(jobRepository).save(entity);
+        verify(jobRepository).markRunningIfClaimed(eq(jobId), any(Instant.class));
+        // The execution gate must never be a read-modify-write: two workers would both win it.
+        verify(jobRepository, never()).save(any());
+    }
+
+    @Test
+    @DisplayName("markRunning - Lost gate: zero updated rows is rejected and executes nothing")
+    void markRunning_LostGateRejected() {
+        UUID jobId = UUID.randomUUID();
+        JobEntity alreadyRunning = createJobEntity(jobId, JobStatus.RUNNING);
+
+        // Another worker won the compare-and-swap, so this caller updates no rows.
+        when(jobRepository.markRunningIfClaimed(eq(jobId), any(Instant.class))).thenReturn(0);
+        when(jobRepository.findById(jobId)).thenReturn(Optional.of(alreadyRunning));
+
+        InvalidStateTransitionException ex = assertThrows(InvalidStateTransitionException.class,
+                () -> jobStateService.markRunning(jobId));
+
+        assertEquals(JobStatus.RUNNING, ex.getCurrentStatus());
+        assertEquals(JobStatus.RUNNING, ex.getTargetStatus());
+        verify(jobRepository, never()).save(any());
     }
 
     @Test

@@ -18,6 +18,13 @@ scheduler:
     max-retries: 5
     max-page-size: 100
 
+worker:
+  # Disabling this removes the worker polling loop; messages are then only processed by an explicit caller.
+  enabled: true
+  # Fixed delay between the end of one receive-and-process cycle and the start of the next.
+  # Long polling inside the consumer (aws.sqs.wait-time-seconds) does most of the waiting.
+  poll-interval-ms: ${WORKER_POLL_INTERVAL_MS:1000}
+
 aws:
   region: ${AWS_REGION:us-east-1}
   sqs:

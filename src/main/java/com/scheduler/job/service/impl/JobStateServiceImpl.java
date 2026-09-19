@@ -19,10 +19,22 @@ import java.util.UUID;
  * Production implementation of {@link JobStateService}.
  * Centralizes state transitions, enforces strict state validation preconditions, and logs all updates.
  *
- * <p><strong>Concurrency Design Note:</strong> Standard {@code findById()} calls within these {@code @Transactional}
- * methods perform plain SELECTs and do not acquire row locks. Single-worker execution ownership is guaranteed upstream
- * by the atomic claiming mechanism (Task 2: PostgreSQL {@code FOR UPDATE SKIP LOCKED}), SQS visibility timeouts, and
- * the single-use {@code CLAIMED -> RUNNING} transition gate, preventing concurrent worker execution races.</p>
+ * <p><strong>Concurrency design.</strong> Most methods here read with {@code findById()}, check the status in
+ * memory and write. That is a read-modify-write and provides no concurrency control on its own: {@code findById()}
+ * issues a plain SELECT with no row lock, and the entity carries no {@code @Version} column. It is safe only where
+ * a single caller is already established as the owner of the transition.</p>
+ *
+ * <p><strong>{@code markRunning} is the exception, and the reason matters.</strong> It is the execution-ownership
+ * gate: SQS delivers at least once, so two workers can hold the same message simultaneously, and whichever wins this
+ * transition is the one that runs the handler. A read-modify-write cannot decide that, because both workers read
+ * {@code CLAIMED}, both pass the check and both write {@code RUNNING}. It is therefore implemented as a single
+ * conditional UPDATE ({@link JobRepository#markRunningIfClaimed}). Under PostgreSQL's default READ COMMITTED
+ * behaviour the losing transaction re-evaluates the condition against the already-updated row, so exactly one
+ * caller sees one updated row and every other caller sees zero.</p>
+ *
+ * <p>Task 2's {@code FOR UPDATE SKIP LOCKED} does not cover this: it guards {@code PENDING -> CLAIMED} during
+ * scheduler claiming. An SQS visibility timeout narrows the duplicate-delivery window but cannot close it, so it is
+ * not a correctness mechanism either.</p>
  */
 @Service
 public class JobStateServiceImpl implements JobStateService {
@@ -48,16 +60,28 @@ public class JobStateServiceImpl implements JobStateService {
         return jobRepository.save(job);
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Implemented as an atomic compare-and-swap so that exactly one of any number of concurrent
+     * callers wins. A caller that loses is rejected with {@link InvalidStateTransitionException} and
+     * must not execute the job.
+     */
     @Override
     @Transactional
     public JobEntity markRunning(UUID jobId) {
-        JobEntity job = getJobOrThrow(jobId);
-        validateTransition(job, JobStatus.CLAIMED, JobStatus.RUNNING);
+        int updatedRows = jobRepository.markRunningIfClaimed(jobId, Instant.now());
 
-        job.setStatus(JobStatus.RUNNING);
+        if (updatedRows == 0) {
+            // Either the job does not exist, or it was not CLAIMED: another worker already took
+            // ownership, or the row never legitimately reached CLAIMED. Re-read to report which.
+            JobEntity job = getJobOrThrow(jobId);
+            log.info("Job '{}' rejected CLAIMED -> RUNNING: current status is {}", jobId, job.getStatus());
+            throw new InvalidStateTransitionException(jobId, job.getStatus(), JobStatus.RUNNING);
+        }
 
         log.info("Job '{}' state transitioned: CLAIMED -> RUNNING", jobId);
-        return jobRepository.save(job);
+        return getJobOrThrow(jobId);
     }
 
     @Override
